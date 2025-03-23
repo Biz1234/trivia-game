@@ -168,4 +168,7 @@ module.exports = (io) => {
     await db.query('UPDATE game_rooms SET status = "finished" WHERE room_code = ?', [roomCode]);
     delete rooms[roomCode];
   }
-};
+};     
+
+
+
