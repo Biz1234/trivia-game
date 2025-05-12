@@ -1,64 +1,44 @@
 // server/routes/auth.js
 const express = require('express');
+const router = express.Router();
 const bcrypt = require('bcrypt');
 const db = require('../config/db');
-const router = express.Router();
 
 router.post('/register', async (req, res) => {
-  const { username, password } = req.body;
-  
-  if (!username || !password) {
-    console.log('Registration failed: Missing fields', { username, password }); // Debug
-    return res.status(400).send('Username and password are required');
-  }
-
+  const { username, password, avatar } = req.body;
   try {
-    const [existingUsers] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
-    if (existingUsers.length > 0) {
-      console.log('Registration failed: Username taken', { username }); // Debug
-      return res.status(409).send('Username already taken');
+    const [existing] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'Username already exists' });
     }
-
     const hashedPassword = await bcrypt.hash(password, 10);
     const [result] = await db.query(
-      'INSERT INTO users (username, password) VALUES (?, ?)',
-      [username, hashedPassword]
+      'INSERT INTO users (username, password, avatar) VALUES (?, ?, ?)',
+      [username, hashedPassword, avatar || '😊']
     );
-    console.log('User registered:', { id: result.insertId, username }); // Debug
-    res.status(201).send('User registered successfully');
+    res.status(201).json({ userId: result.insertId, username, avatar: avatar || '😊' });
   } catch (err) {
-    console.error('Error during registration:', err);
-    res.status(500).send('Server error during registration');
+    console.error('Error in register:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 
 router.post('/login', async (req, res) => {
   const { username, password } = req.body;
-
-  if (!username || !password) {
-    console.log('Login failed: Missing fields', { username, password }); // Debug
-    return res.status(400).send('Username and password are required');
-  }
-
   try {
     const [users] = await db.query('SELECT * FROM users WHERE username = ?', [username]);
     if (users.length === 0) {
-      console.log('Login failed: User not found', { username }); // Debug
-      return res.status(401).send('Invalid username or password');
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
-
     const user = users[0];
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      console.log('Login failed: Invalid password', { username }); // Debug
-      return res.status(401).send('Invalid username or password');
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) {
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
-
-    console.log('User logged in:', { id: user.id, username }); // Debug
-    res.json({ id: user.id, username });
+    res.json({ userId: user.id, username: user.username, avatar: user.avatar });
   } catch (err) {
-    console.error('Error during login:', err);
-    res.status(500).send('Server error during login');
+    console.error('Error in login:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

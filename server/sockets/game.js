@@ -21,12 +21,12 @@ module.exports = (io) => {
         if (!rooms[roomCode]) {
           rooms[roomCode] = { players: [], questions: [], currentQuestion: 0, timer: null, id: roomId, chat: [] };
         }
-        const [userRows] = await db.query('SELECT username FROM users WHERE id = ?', [userId]);
-        const username = userRows[0]?.username || `Player ${userId}`;
-        rooms[roomCode].players.push({ socketId: socket.id, userId, username, score: 0, lastAnswer: null });
+        const [userRows] = await db.query('SELECT username, avatar FROM users WHERE id = ?', [userId]);
+        const { username, avatar } = userRows[0] || { username: `Player ${userId}`, avatar: '😊' };
+        rooms[roomCode].players.push({ socketId: socket.id, userId, username, avatar, score: 0, lastAnswer: null });
         console.log('Player joined room:', roomCode, 'Players:', rooms[roomCode].players);
         io.to(roomCode).emit('playerJoined', rooms[roomCode].players);
-        socket.emit('chatHistory', rooms[roomCode].chat); // Send chat history to new player
+        socket.emit('chatHistory', rooms[roomCode].chat);
       } catch (err) {
         console.error('Error in joinRoom:', err);
         socket.emit('error', 'Error joining room');
@@ -34,7 +34,7 @@ module.exports = (io) => {
     });
 
     socket.on('startGame', async ({ roomId, categories, difficulty }) => {
-      console.log('Received startGame event with roomId:', roomId, 'categories:', categories, 'difficulty:', difficulty);
+      console.log('Received startGame event:', { roomId, categories, difficulty });
       try {
         const [roomRows] = await db.query('SELECT room_code FROM game_rooms WHERE id = ?', [roomId]);
         if (roomRows.length === 0) {
@@ -56,13 +56,16 @@ module.exports = (io) => {
           params.push(difficulty);
         }
         query += ' ORDER BY RAND() LIMIT 5';
+        console.log('Executing query:', query, 'with params:', params);
         const [questions] = await db.query(query, params);
-        if (questions.length < 5) {
-          socket.emit('error', 'Not enough questions for selected categories and difficulty');
+        console.log('Fetched questions:', questions);
+        if (questions.length === 0) {
+          socket.emit('error', 'No questions available for selected categories and difficulty');
           return;
         }
         rooms[roomCode].questions = questions;
 
+        console.log('Starting game with', questions.length, 'questions');
         io.to(roomCode).emit('gameStarted', {
           questions: rooms[roomCode].questions,
           current: {
@@ -87,14 +90,15 @@ module.exports = (io) => {
       const player = room.players.find(p => p.userId === userId);
       if (!player.lastAnswer) {
         const isCorrect = answer === currentQ.correct_answer;
+        let points = 0; // Define points with default 0
         if (isCorrect) {
-          const points = currentQ.difficulty === 'easy' ? 5 : currentQ.difficulty === 'medium' ? 10 : 15;
+          points = currentQ.difficulty === 'easy' ? 5 : currentQ.difficulty === 'medium' ? 10 : 15;
           player.score += points;
         }
         player.lastAnswer = answer;
-        console.log('Answer submitted:', { userId, answer, isCorrect, points: isCorrect ? points : 0 });
+        console.log('Answer submitted:', { userId, answer, isCorrect, points });
         socket.emit('answerFeedback', { isCorrect, correctAnswer: currentQ.correct_answer });
-        io.to(roomCode).emit('scoreUpdate', room.players.map(p => ({ username: p.username, score: p.score })));
+        io.to(roomCode).emit('scoreUpdate', room.players.map(p => ({ username: p.username, avatar: p.avatar, score: p.score })));
       }
 
       const allAnswered = room.players.every(p => p.lastAnswer !== undefined);
@@ -109,7 +113,7 @@ module.exports = (io) => {
       if (!room) return;
       const player = room.players.find(p => p.userId === userId);
       if (!player) return;
-      const chatMessage = { username: player.username, message, timestamp: Date.now() };
+      const chatMessage = { username: player.username, avatar: player.avatar, message, timestamp: Date.now() };
       room.chat.push(chatMessage);
       console.log('Chat message:', chatMessage);
       io.to(roomCode).emit('newMessage', chatMessage);
@@ -156,19 +160,29 @@ module.exports = (io) => {
     const room = rooms[roomCode];
     const scoresWithNames = room.players.map(player => ({
       username: player.username,
+      avatar: player.avatar,
       score: player.score
     }));
     console.log('Game ended, sending scores:', scoresWithNames);
     io.to(roomCode).emit('gameEnded', { scores: scoresWithNames });
 
+    const maxScore = Math.max(...room.players.map(p => p.score));
     for (const player of room.players) {
-      await db.query('INSERT INTO player_scores (user_id, room_id, score) VALUES (?, ?, ?)', 
-        [player.userId, room.id, player.score]);
+      const isWinner = player.score === maxScore && maxScore > 0;
+      await db.query(
+        'INSERT INTO player_scores (user_id, room_id, score) VALUES (?, ?, ?)',
+        [player.userId, room.id, player.score]
+      );
+      await db.query(
+        'INSERT INTO player_stats (user_id, games_played, games_won, total_score) ' +
+        'VALUES (?, 1, ?, ?) ON DUPLICATE KEY UPDATE ' +
+        'games_played = games_played + 1, ' +
+        'games_won = games_won + ?, ' +
+        'total_score = total_score + ?',
+        [player.userId, isWinner ? 1 : 0, player.score, isWinner ? 1 : 0, player.score]
+      );
     }
     await db.query('UPDATE game_rooms SET status = "finished" WHERE room_code = ?', [roomCode]);
     delete rooms[roomCode];
   }
-};     
-
-
-
+};
